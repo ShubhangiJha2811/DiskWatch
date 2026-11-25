@@ -1,0 +1,978 @@
+<!-- DiskWatch Scanner -->
+<title>DiskWatch Scanner</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page-plane:     #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --success-text:   #006300;
+
+    --cat-1: #2a78d6; /* build/dependency junk */
+    --cat-2: #eb6834; /* installers & archives */
+    --cat-3: #1baf7a; /* large media */
+    --cat-4: #eda100; /* duplicates */
+    --cat-5: #e87ba4; /* logs */
+    --cat-6: #008300; /* temp/cache */
+
+    --seq-300: #6da7ec;
+    --seq-450: #2a78d6;
+
+    --status-good: #0ca30c;
+    --status-warning: #fab219;
+    --status-serious: #ec835a;
+    --status-critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page-plane:     #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --success-text:   #0ca30c;
+
+      --cat-1: #3987e5;
+      --cat-2: #d95926;
+      --cat-3: #199e70;
+      --cat-4: #c98500;
+      --cat-5: #d55181;
+      --cat-6: #008300;
+
+      --seq-300: #5598e7;
+      --seq-450: #3987e5;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page-plane:     #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --success-text:   #0ca30c;
+
+    --cat-1: #3987e5;
+    --cat-2: #d95926;
+    --cat-3: #199e70;
+    --cat-4: #c98500;
+    --cat-5: #d55181;
+    --cat-6: #008300;
+
+    --seq-300: #5598e7;
+    --seq-450: #3987e5;
+  }
+
+  body { background: var(--page-plane); color: var(--text-primary); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--baseline); border-radius: 999px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; }
+  .hairline { border-color: var(--border); }
+
+  .bar-track { background: var(--gridline); border-radius: 999px; height: 10px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 999px; transition: width 400ms ease; }
+
+  .tooltip {
+    position: absolute; z-index: 30; pointer-events: none;
+    background: var(--text-primary); color: var(--surface-1);
+    font-size: 12px; padding: 6px 9px; border-radius: 8px; white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+  }
+
+  .tabular { font-variant-numeric: tabular-nums; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { animation: spin 0.8s linear infinite; }
+</style>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.25.6/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+const DB_NAME = 'diskwatch-scanner';
+const DB_VERSION = 2;
+const STORE = 'drives';
+const STORE_HISTORY = 'scanHistory';
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_HISTORY)) db.createObjectStore(STORE_HISTORY, { keyPath: 'id' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGetAll() {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbPut(record) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbDelete(id) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbAddHistory(record) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_HISTORY, 'readwrite');
+    tx.objectStore(STORE_HISTORY).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGetHistory() {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_HISTORY, 'readonly');
+    const req = tx.objectStore(STORE_HISTORY).getAll();
+    req.onsuccess = () => resolve((req.result || []).sort((a, b) => a.timestamp - b.timestamp));
+    req.onerror = () => reject(req.error);
+  });
+}
+
+const THEME_KEY = 'diskwatch-theme';
+function getStoredTheme() {
+  try { return localStorage.getItem(THEME_KEY) || 'system'; } catch (e) { return 'system'; }
+}
+function applyTheme(theme) {
+  try {
+    if (theme === 'system') { document.documentElement.removeAttribute('data-theme'); localStorage.removeItem(THEME_KEY); }
+    else { document.documentElement.setAttribute('data-theme', theme); localStorage.setItem(THEME_KEY, theme); }
+  } catch (e) {}
+}
+
+function formatBytes(n) {
+  if (!n || n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(i === 0 ? 0 : (v < 10 ? 2 : 1))} ${units[i]}`;
+}
+function truncateMiddle(str, max) {
+  if (str.length <= max) return str;
+  const half = Math.floor((max - 1) / 2);
+  return str.slice(0, half) + '…' + str.slice(str.length - half);
+}
+
+const CATEGORIES = [
+  { key: 'buildJunk',   label: 'Build & dependency junk',   color: 'var(--cat-1)' },
+  { key: 'installers',  label: 'Old installers & archives',  color: 'var(--cat-2)' },
+  { key: 'largeMedia',  label: 'Large media files',          color: 'var(--cat-3)' },
+  { key: 'duplicates',  label: 'Likely duplicates',          color: 'var(--cat-4)' },
+  { key: 'logs',        label: 'Log files',                  color: 'var(--cat-5)' },
+  { key: 'tempFiles',   label: 'Temporary & cache files',    color: 'var(--cat-6)' },
+];
+
+const JUNK_DIR_NAMES = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.nuxt', 'target', '.cache', '__pycache__', '.venv', 'venv', '.gradle', '.turbo']);
+const TEMP_NAME_RE = /(\.tmp|\.temp|\.bak|\.old)$/i;
+const TEMP_EXACT = new Set(['thumbs.db', '.ds_store', 'desktop.ini']);
+const LOG_RE = /\.log$/i;
+const ARCHIVE_INSTALLER_RE = /\.(zip|rar|7z|tar|gz|tgz|exe|msi|dmg|pkg|iso)$/i;
+const MEDIA_RE = /\.(mp4|mov|mkv|avi|wmv|flv|wav|flac|aiff|m4v)$/i;
+const AGE_THRESHOLD_MS = 90 * 24 * 60 * 60 * 1000;
+const LARGE_MEDIA_THRESHOLD = 200 * 1024 * 1024;
+const DUP_MIN_SIZE = 1 * 1024 * 1024;
+const MAX_DUP_KEYS = 20000;
+const MAX_FLAGGED = 3000;
+const TOP_N = 50;
+
+class CancelledError extends Error {}
+
+function yieldToMain() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function pushTopN(list, item, n) {
+  if (list.length < n) {
+    list.push(item);
+    let i = list.length - 1;
+    while (i > 0 && list[i - 1].size < list[i].size) { [list[i - 1], list[i]] = [list[i], list[i - 1]]; i--; }
+    return;
+  }
+  if (item.size <= list[n - 1].size) return;
+  list[n - 1] = item;
+  let i = n - 1;
+  while (i > 0 && list[i - 1].size < list[i].size) { [list[i - 1], list[i]] = [list[i], list[i - 1]]; i--; }
+}
+
+function addCategoryTotal(ctx, key, size) {
+  const c = ctx.categoryTotals[key];
+  c.size += size;
+  c.count += 1;
+}
+
+function addFlagged(ctx, category, name, path, size, kind, handle, parentHandle, reason) {
+  if (ctx.flagged.length >= MAX_FLAGGED) { ctx.truncated = true; return; }
+  ctx.flagged.push({ id: ctx.nextId++, category, name, path, size, kind, reason, handle, parentHandle });
+  addCategoryTotal(ctx, category, size);
+}
+
+function classifyFile(name, size, lastModified, path, fileHandle, parentHandle, ctx) {
+  const lower = name.toLowerCase();
+  if (/^~\$/.test(name) || TEMP_EXACT.has(lower) || TEMP_NAME_RE.test(lower)) {
+    addFlagged(ctx, 'tempFiles', name, path, size, 'file', fileHandle, parentHandle,
+      'Temporary or cache file left behind by an application — usually safe to remove.');
+    return;
+  }
+  if (LOG_RE.test(lower)) {
+    addFlagged(ctx, 'logs', name, path, size, 'file', fileHandle, parentHandle,
+      'Log file — safe to clear unless you need it for troubleshooting.');
+    return;
+  }
+  if (ARCHIVE_INSTALLER_RE.test(lower) && (Date.now() - lastModified) > AGE_THRESHOLD_MS) {
+    addFlagged(ctx, 'installers', name, path, size, 'file', fileHandle, parentHandle,
+      'Installer or archive last modified over 90 days ago — likely already used and no longer needed.');
+    return;
+  }
+  if (MEDIA_RE.test(lower) && size >= LARGE_MEDIA_THRESHOLD) {
+    addFlagged(ctx, 'largeMedia', name, path, size, 'file', fileHandle, parentHandle,
+      'Large media file — review before keeping, or move it to external storage.');
+    return;
+  }
+  if (size >= DUP_MIN_SIZE) {
+    const key = size + '|' + lower;
+    if (ctx.dupMap.has(key) || ctx.dupMap.size < MAX_DUP_KEYS) {
+      if (!ctx.dupMap.has(key)) ctx.dupMap.set(key, []);
+      ctx.dupMap.get(key).push({ name, size, path, handle: fileHandle, parentHandle });
+    }
+  }
+}
+
+async function computeAggregate(handle, ctx) {
+  let size = 0;
+  let entries;
+  try { entries = handle.entries(); } catch (e) { return size; }
+  try {
+    for await (const [, childHandle] of entries) {
+      ctx.opCount++;
+      if (ctx.opCount % 300 === 0) {
+        await yieldToMain();
+        if (ctx.cancelled) throw new CancelledError();
+      }
+      if (childHandle.kind === 'directory') {
+        size += await computeAggregate(childHandle, ctx);
+      } else {
+        try { const f = await childHandle.getFile(); size += f.size; } catch (e) { ctx.skipped.push(childHandle.name); }
+      }
+    }
+  } catch (e) {
+    if (e instanceof CancelledError) throw e;
+    ctx.skipped.push(handle.name);
+  }
+  return size;
+}
+
+async function walk(handle, path, parentHandle, ctx, depth) {
+  if (ctx.cancelled) throw new CancelledError();
+  if (depth > 0 && JUNK_DIR_NAMES.has(handle.name.toLowerCase())) {
+    let size = 0;
+    try { size = await computeAggregate(handle, ctx); } catch (e) { if (e instanceof CancelledError) throw e; }
+    ctx.totalSize += size;
+    ctx.totalFolders += 1;
+    addFlagged(ctx, 'buildJunk', handle.name, path, size, 'directory', handle, parentHandle,
+      'Dependency or build-output folder — regenerated automatically by its tool, safe to delete when you are not actively building this project.');
+    ctx.onProgress(ctx);
+    return size;
+  }
+
+  let dirSize = 0;
+  let entries;
+  try { entries = handle.entries(); } catch (e) { ctx.skipped.push(path); return 0; }
+  try {
+    for await (const [name, childHandle] of entries) {
+      ctx.opCount++;
+      if (ctx.opCount % 300 === 0) {
+        await yieldToMain();
+        ctx.onProgress(ctx, path);
+        if (ctx.cancelled) throw new CancelledError();
+      }
+      const childPath = path + '/' + name;
+      if (childHandle.kind === 'directory') {
+        dirSize += await walk(childHandle, childPath, handle, ctx, depth + 1);
+        ctx.totalFolders += 1;
+      } else {
+        let file;
+        try { file = await childHandle.getFile(); } catch (e) { ctx.skipped.push(childPath); continue; }
+        const size = file.size;
+        dirSize += size;
+        ctx.totalFiles += 1;
+        ctx.totalSize += size;
+        pushTopN(ctx.topFiles, { name, path: childPath, size, handle: childHandle, parentHandle: handle }, TOP_N);
+        classifyFile(name, size, file.lastModified, childPath, childHandle, handle, ctx);
+      }
+    }
+  } catch (e) {
+    if (e instanceof CancelledError) throw e;
+    ctx.skipped.push(path);
+  }
+  if (depth > 0) {
+    pushTopN(ctx.topFolders, { name: handle.name, path, size: dirSize, handle, parentHandle }, TOP_N);
+  }
+  return dirSize;
+}
+
+function initCategoryTotals() {
+  const o = {};
+  CATEGORIES.forEach((c) => { o[c.key] = { size: 0, count: 0 }; });
+  return o;
+}
+
+function buildNarrative(ctx, driveCount) {
+  const parts = [];
+  parts.push(`This scan covered ${driveCount} drive${driveCount === 1 ? '' : 's'}, walking ${ctx.totalFiles.toLocaleString()} files across ${ctx.totalFolders.toLocaleString()} folders for a total of ${formatBytes(ctx.totalSize)}.`);
+
+  const ranked = CATEGORIES.map((c) => ({ ...c, ...ctx.categoryTotals[c.key] })).filter((c) => c.count > 0).sort((a, b) => b.size - a.size);
+  if (ranked.length > 0) {
+    const top = ranked.slice(0, 3);
+    const clauses = top.map((c) => `${formatBytes(c.size)} in ${c.label.toLowerCase()} (${c.count.toLocaleString()} item${c.count === 1 ? '' : 's'})`);
+    parts.push(`Most of the reclaimable space is ${clauses.join(', ')}.`);
+  } else {
+    parts.push("No obvious clutter matched the cleanup rules — this disk looks fairly tidy.");
+  }
+
+  if (ctx.topFolders.length > 0) {
+    const biggest = ctx.topFolders[0];
+    parts.push(`The single largest folder found was "${truncateMiddle(biggest.path, 60)}" at ${formatBytes(biggest.size)}.`);
+  }
+
+  const reclaimable = ranked.reduce((s, c) => s + c.size, 0);
+  if (reclaimable > 0) {
+    parts.push(`If every flagged item were removed, this scan estimates about ${formatBytes(reclaimable)} could be freed — always review the list before deleting anything.`);
+  }
+  return parts.join(' ');
+}
+
+function sameDrives(namesA, namesB) {
+  if (namesA.length !== namesB.length) return false;
+  const a = [...namesA].sort();
+  const b = [...namesB].sort();
+  return a.every((n, i) => n === b[i]);
+}
+
+function describeWhen(fromTs, toTs) {
+  const days = Math.round((toTs - fromTs) / 86400000);
+  if (days <= 0) return 'since your last scan';
+  if (days === 1) return 'since yesterday';
+  if (days < 7) return `since ${days} days ago`;
+  if (days <= 10) return 'since last week';
+  const weeks = Math.round(days / 7);
+  return weeks <= 1 ? 'since last week' : `since ~${weeks} weeks ago`;
+}
+
+function computeTrend(current, previous) {
+  if (!previous || !sameDrives(current.driveNames, previous.driveNames)) return null;
+  return {
+    deltaReclaim: current.reclaimableSize - previous.reclaimableSize,
+    deltaTotal: current.totalSize - previous.totalSize,
+    when: describeWhen(previous.timestamp, current.timestamp),
+    previous,
+  };
+}
+
+function Spinner() {
+  return React.createElement('svg', { className: 'spinner', width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none' },
+    React.createElement('circle', { cx: 12, cy: 12, r: 9, stroke: 'currentColor', strokeOpacity: 0.25, strokeWidth: 3 }),
+    React.createElement('path', { d: 'M21 12a9 9 0 0 0-9-9', stroke: 'currentColor', strokeWidth: 3, strokeLinecap: 'round' })
+  );
+}
+
+function Bar({ value, max, color }) {
+  const pct = max > 0 ? Math.max((value / max) * 100, value > 0 ? 1.5 : 0) : 0;
+  return React.createElement('div', { className: 'bar-track w-full' },
+    React.createElement('div', { className: 'bar-fill', style: { width: pct + '%', background: color } })
+  );
+}
+
+function CategoryChart({ categoryTotals, totalFlaggedSize }) {
+  const rows = CATEGORIES.map((c) => ({ ...c, ...categoryTotals[c.key] }));
+  const max = Math.max(...rows.map((r) => r.size), 1);
+  const [hover, setHover] = useState(null);
+  return React.createElement('div', { className: 'space-y-3' },
+    rows.map((r, idx) => React.createElement('div', {
+        key: r.key, className: 'relative',
+        onMouseEnter: () => setHover(idx), onMouseLeave: () => setHover(null),
+      },
+      React.createElement('div', { className: 'flex items-center justify-between text-sm mb-1' },
+        React.createElement('div', { className: 'flex items-center gap-2 min-w-0' },
+          React.createElement('span', { className: 'inline-block w-2.5 h-2.5 rounded-full shrink-0', style: { background: r.color } }),
+          React.createElement('span', { className: 'truncate', style: { color: 'var(--text-primary)' } }, r.label)
+        ),
+        React.createElement('span', { className: 'tabular shrink-0 ml-2', style: { color: 'var(--text-secondary)' } },
+          r.count > 0 ? `${formatBytes(r.size)} · ${r.count.toLocaleString()} item${r.count === 1 ? '' : 's'}` : '—')
+      ),
+      React.createElement(Bar, { value: r.size, max, color: r.color }),
+      hover === idx && r.count > 0 && React.createElement('div', { className: 'tooltip -top-7 left-0' },
+        `${totalFlaggedSize > 0 ? ((r.size / totalFlaggedSize) * 100).toFixed(1) : '0'}% of flagged space`)
+    ))
+  );
+}
+
+function RankedList({ items, emptyLabel }) {
+  const max = Math.max(...items.map((i) => i.size), 1);
+  if (items.length === 0) return React.createElement('p', { className: 'text-sm', style: { color: 'var(--text-muted)' } }, emptyLabel);
+  return React.createElement('div', { className: 'space-y-2.5' },
+    items.slice(0, 10).map((item, idx) => React.createElement('div', { key: idx },
+      React.createElement('div', { className: 'flex items-center justify-between text-sm mb-1 gap-3' },
+        React.createElement('span', { className: 'truncate', title: item.path, style: { color: 'var(--text-primary)' } }, truncateMiddle(item.path, 54)),
+        React.createElement('span', { className: 'tabular shrink-0', style: { color: 'var(--text-secondary)' } }, formatBytes(item.size))
+      ),
+      React.createElement(Bar, { value: item.size, max, color: 'var(--seq-450)' })
+    ))
+  );
+}
+
+function ConfirmModal({ title, body, confirmLabel, danger, onConfirm, onCancel }) {
+  return React.createElement('div', { className: 'fixed inset-0 z-40 flex items-center justify-center p-4', style: { background: 'rgba(0,0,0,0.45)' }, onClick: onCancel },
+    React.createElement('div', { className: 'card p-6 max-w-md w-full', onClick: (e) => e.stopPropagation() },
+      React.createElement('h3', { className: 'text-lg font-semibold mb-2' }, title),
+      React.createElement('div', { className: 'text-sm mb-5', style: { color: 'var(--text-secondary)' } }, body),
+      React.createElement('div', { className: 'flex justify-end gap-2' },
+        React.createElement('button', {
+          className: 'px-4 py-2 rounded-lg text-sm font-medium hairline border',
+          onClick: onCancel,
+        }, 'Cancel'),
+        React.createElement('button', {
+          className: 'px-4 py-2 rounded-lg text-sm font-medium text-white',
+          style: { background: danger ? 'var(--status-critical)' : 'var(--cat-1)' },
+          onClick: onConfirm,
+        }, confirmLabel)
+      )
+    )
+  );
+}
+
+function ToastStack({ toasts }) {
+  return React.createElement('div', { className: 'fixed bottom-4 right-4 z-50 space-y-2 max-w-sm' },
+    toasts.map((t) => React.createElement('div', {
+      key: t.id, className: 'card px-4 py-3 text-sm shadow-lg',
+      style: { borderColor: t.tone === 'error' ? 'var(--status-critical)' : 'var(--border)' },
+    }, t.text))
+  );
+}
+
+function DriveRow({ drive, onContinue, onForget }) {
+  const statusLabel = drive.status === 'granted' ? 'Connected' : drive.status === 'denied' ? 'Access denied' : 'Needs one click to reconnect';
+  const statusColor = drive.status === 'granted' ? 'var(--status-good)' : drive.status === 'denied' ? 'var(--status-critical)' : 'var(--status-warning)';
+  return React.createElement('div', { className: 'flex items-center justify-between gap-3 py-3 px-4 hairline border rounded-lg' },
+    React.createElement('div', { className: 'min-w-0' },
+      React.createElement('p', { className: 'font-medium truncate' }, drive.name),
+      React.createElement('p', { className: 'text-xs flex items-center gap-1.5 mt-0.5' },
+        React.createElement('span', { className: 'inline-block w-1.5 h-1.5 rounded-full', style: { background: statusColor } }),
+        React.createElement('span', { style: { color: 'var(--text-muted)' } }, statusLabel)
+      )
+    ),
+    React.createElement('div', { className: 'flex items-center gap-2 shrink-0' },
+      drive.status !== 'granted' && React.createElement('button', {
+        className: 'px-3 py-1.5 rounded-md text-xs font-medium text-white',
+        style: { background: 'var(--cat-1)' },
+        onClick: () => onContinue(drive),
+      }, 'Continue'),
+      React.createElement('button', {
+        className: 'px-3 py-1.5 rounded-md text-xs font-medium hairline border',
+        onClick: () => onForget(drive),
+      }, 'Forget')
+    )
+  );
+}
+
+const THEME_OPTIONS = [
+  { key: 'system', label: 'System', icon: React.createElement('path', { d: 'M4 5h16v10H4z M9 19h6 M12 15v4', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }) },
+  { key: 'light', label: 'Light', icon: React.createElement('g', { fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' },
+      React.createElement('circle', { cx: 12, cy: 12, r: 4 }),
+      React.createElement('path', { d: 'M12 2v2.5 M12 19.5V22 M4.2 4.2l1.8 1.8 M18 18l1.8 1.8 M2 12h2.5 M19.5 12H22 M4.2 19.8l1.8-1.8 M18 6l1.8-1.8' })) },
+  { key: 'dark', label: 'Dark', icon: React.createElement('path', { d: 'M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinejoin: 'round' }) },
+];
+
+function ThemeToggle({ theme, onChange }) {
+  return React.createElement('div', { className: 'inline-flex items-center gap-0.5 p-0.5 rounded-lg hairline border', role: 'radiogroup', 'aria-label': 'Theme' },
+    THEME_OPTIONS.map((opt) => React.createElement('button', {
+      key: opt.key,
+      type: 'button',
+      role: 'radio',
+      'aria-checked': theme === opt.key,
+      title: opt.label,
+      className: 'p-1.5 rounded-md',
+      style: theme === opt.key ? { background: 'var(--cat-1)', color: 'white' } : { color: 'var(--text-secondary)' },
+      onClick: () => onChange(opt.key),
+    }, React.createElement('svg', { width: 15, height: 15, viewBox: '0 0 24 24' }, opt.icon)))
+  );
+}
+
+function App() {
+  const supported = typeof window !== 'undefined' && !!window.showDirectoryPicker;
+  const [theme, setTheme] = useState(getStoredTheme);
+
+  useEffect(() => { applyTheme(theme); }, [theme]);
+  const [drives, setDrives] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [progress, setProgress] = useState({ files: 0, folders: 0, path: '' });
+  const [results, setResults] = useState(null);
+  const [summaryMode, setSummaryMode] = useState('quick');
+  const [selected, setSelected] = useState(new Set());
+  const [confirmItem, setConfirmItem] = useState(null);
+  const [confirmBulk, setConfirmBulk] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const [pickerError, setPickerError] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('all');
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [scanBaseline, setScanBaseline] = useState(null);
+  const [pendingFreed, setPendingFreed] = useState(0);
+  const [comparison, setComparison] = useState(null);
+  const scanCtxRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try { setHistory(await idbGetHistory()); } catch (e) { /* IndexedDB unavailable — history just won't persist */ }
+    })();
+  }, []);
+
+  const trend = useMemo(() => {
+    if (history.length < 2) return null;
+    return computeTrend(history[history.length - 1], history[history.length - 2]);
+  }, [history]);
+
+  const pushToast = useCallback((text, tone) => {
+    const id = Date.now() + Math.random();
+    setToasts((t) => [...t, { id, text, tone }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4500);
+  }, []);
+
+  useEffect(() => {
+    if (!supported) return;
+    (async () => {
+      try {
+        const records = await idbGetAll();
+        const withStatus = await Promise.all(records.map(async (r) => {
+          try {
+            const status = await r.handle.queryPermission({ mode: 'readwrite' });
+            return { ...r, status };
+          } catch (e) {
+            return { ...r, status: 'denied' };
+          }
+        }));
+        setDrives(withStatus);
+      } catch (e) { /* IndexedDB unavailable — start fresh, in-memory only */ }
+    })();
+  }, [supported]);
+
+  const addDrive = useCallback(async () => {
+    setPickerError('');
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      for (const d of drives) {
+        try { if (await d.handle.isSameEntry(handle)) { pushToast(`"${d.name}" is already added.`, null); return; } } catch (e) {}
+      }
+      const record = { id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())), name: handle.name, handle, addedAt: Date.now() };
+      setDrives((prev) => [...prev, { ...record, status: 'granted' }]);
+      try { await idbPut(record); } catch (e) { pushToast("Couldn't remember this drive for next visit, but it's ready to scan now.", null); }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      setPickerError("Couldn't open the folder picker. If this page is embedded in a preview, open its link directly in a new browser tab and try again.");
+    }
+  }, [drives, pushToast]);
+
+  const continueDrive = useCallback(async (drive) => {
+    try {
+      const status = await drive.handle.requestPermission({ mode: 'readwrite' });
+      setDrives((prev) => prev.map((d) => (d.id === drive.id ? { ...d, status } : d)));
+    } catch (e) {
+      setDrives((prev) => prev.map((d) => (d.id === drive.id ? { ...d, status: 'denied' } : d)));
+    }
+  }, []);
+
+  const forgetDrive = useCallback(async (drive) => {
+    setDrives((prev) => prev.filter((d) => d.id !== drive.id));
+    try { await idbDelete(drive.id); } catch (e) {}
+  }, []);
+
+  const grantedDrives = drives.filter((d) => d.status === 'granted');
+
+  const startScan = useCallback(async () => {
+    if (grantedDrives.length === 0) return;
+    const priorBaseline = scanBaseline;
+    const priorPendingFreed = pendingFreed;
+    setResults(null);
+    setSelected(new Set());
+    setScanning(true);
+    setProgress({ files: 0, folders: 0, path: '' });
+
+    const ctx = {
+      flagged: [], nextId: 1, topFolders: [], topFiles: [],
+      categoryTotals: initCategoryTotals(), dupMap: new Map(), skipped: [],
+      opCount: 0, cancelled: false, truncated: false,
+      totalSize: 0, totalFiles: 0, totalFolders: 0,
+      onProgress: (c, path) => setProgress({ files: c.totalFiles, folders: c.totalFolders, path: path || '' }),
+    };
+    scanCtxRef.current = ctx;
+
+    try {
+      for (const drive of grantedDrives) {
+        if (ctx.cancelled) break;
+        await walk(drive.handle, drive.name, null, ctx, 0);
+      }
+    } catch (e) {
+      if (!(e instanceof CancelledError)) pushToast('Scan stopped early after an unexpected error.', 'error');
+    }
+
+    for (const [, group] of ctx.dupMap) {
+      if (group.length > 1) {
+        for (let i = 1; i < group.length; i++) {
+          if (ctx.flagged.length >= MAX_FLAGGED) { ctx.truncated = true; break; }
+          const it = group[i];
+          addFlagged(ctx, 'duplicates', it.name, it.path, it.size, 'file', it.handle, it.parentHandle,
+            `Same name and size as ${truncateMiddle(group[0].path, 50)} — verify before keeping both.`);
+        }
+      }
+    }
+
+    ctx.topFolders.sort((a, b) => b.size - a.size);
+    ctx.topFiles.sort((a, b) => b.size - a.size);
+    ctx.narrative = buildNarrative(ctx, grantedDrives.length);
+    setResults(ctx);
+    setScanning(false);
+    scanCtxRef.current = null;
+
+    if (!ctx.cancelled) {
+      const reclaimableSize = CATEGORIES.reduce((s, c) => s + ctx.categoryTotals[c.key].size, 0);
+      const record = {
+        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
+        timestamp: Date.now(),
+        totalSize: ctx.totalSize,
+        totalFiles: ctx.totalFiles,
+        totalFolders: ctx.totalFolders,
+        reclaimableSize,
+        driveNames: grantedDrives.map((d) => d.name),
+      };
+      setHistory((h) => [...h, record]);
+      try { await idbAddHistory(record); } catch (e) {}
+
+      if (priorBaseline != null && priorPendingFreed > 0) {
+        setComparison({ before: priorBaseline, after: ctx.totalSize, expected: priorPendingFreed, actual: priorBaseline - ctx.totalSize });
+      }
+      setScanBaseline(ctx.totalSize);
+      setPendingFreed(0);
+    }
+  }, [grantedDrives, pushToast, scanBaseline, pendingFreed]);
+
+  const stopScan = useCallback(() => {
+    if (scanCtxRef.current) scanCtxRef.current.cancelled = true;
+  }, []);
+
+  const deleteOne = useCallback(async (item) => {
+    try {
+      await item.parentHandle.removeEntry(item.name, { recursive: item.kind === 'directory' });
+      setResults((r) => {
+        if (!r) return r;
+        const flagged = r.flagged.filter((f) => f.id !== item.id);
+        const categoryTotals = { ...r.categoryTotals, [item.category]: { size: r.categoryTotals[item.category].size - item.size, count: r.categoryTotals[item.category].count - 1 } };
+        return { ...r, flagged, categoryTotals, totalSize: r.totalSize - item.size };
+      });
+      setSelected((s) => { const n = new Set(s); n.delete(item.id); return n; });
+      setPendingFreed((p) => p + item.size);
+      setComparison(null);
+      pushToast(`Deleted "${item.name}" — freed ${formatBytes(item.size)}.`, null);
+    } catch (e) {
+      pushToast(`Couldn't delete "${item.name}": ${e.message || e}`, 'error');
+    }
+    setConfirmItem(null);
+  }, [pushToast]);
+
+  const deleteSelected = useCallback(async () => {
+    if (!results) return;
+    const items = results.flagged.filter((f) => selected.has(f.id));
+    let freed = 0, failed = 0;
+    const deletedIds = new Set();
+    for (const item of items) {
+      try {
+        await item.parentHandle.removeEntry(item.name, { recursive: item.kind === 'directory' });
+        freed += item.size;
+        deletedIds.add(item.id);
+      } catch (e) { failed++; }
+    }
+    setResults((r) => {
+      if (!r) return r;
+      const categoryTotals = { ...r.categoryTotals };
+      for (const it of items) {
+        if (deletedIds.has(it.id) && categoryTotals[it.category]) {
+          categoryTotals[it.category] = { size: Math.max(0, categoryTotals[it.category].size - it.size), count: Math.max(0, categoryTotals[it.category].count - 1) };
+        }
+      }
+      return { ...r, flagged: r.flagged.filter((f) => !deletedIds.has(f.id)), categoryTotals, totalSize: r.totalSize - freed };
+    });
+    setSelected((s) => { const n = new Set(s); deletedIds.forEach((id) => n.delete(id)); return n; });
+    setConfirmBulk(false);
+    if (freed > 0) { setPendingFreed((p) => p + freed); setComparison(null); }
+    pushToast(failed > 0 ? `Deleted ${items.length - failed} of ${items.length} items (freed ${formatBytes(freed)}); ${failed} failed.` : `Deleted ${items.length} items — freed ${formatBytes(freed)}.`, failed > 0 ? 'error' : null);
+  }, [results, selected, pushToast]);
+
+  const toggleSelected = (id) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const flaggedFiltered = useMemo(() => {
+    if (!results) return [];
+    return categoryFilter === 'all' ? results.flagged : results.flagged.filter((f) => f.category === categoryFilter);
+  }, [results, categoryFilter]);
+
+  const totalFlaggedSize = useMemo(() => {
+    if (!results) return 0;
+    return CATEGORIES.reduce((s, c) => s + results.categoryTotals[c.key].size, 0);
+  }, [results]);
+
+  if (!supported) {
+    return React.createElement('div', { className: 'min-h-screen flex items-center justify-center p-6' },
+      React.createElement('div', { className: 'card p-8 max-w-md text-center' },
+        React.createElement('h1', { className: 'text-xl font-semibold mb-2' }, 'DiskWatch Scanner'),
+        React.createElement('p', { className: 'text-sm', style: { color: 'var(--text-secondary)' } },
+          'This tool needs the File System Access API, available in desktop Chrome or Edge. Please open this link in one of those browsers.')
+      )
+    );
+  }
+
+  return React.createElement('div', { className: 'min-h-screen max-w-3xl mx-auto p-5 sm:p-8' },
+    React.createElement('header', { className: 'mb-6 flex items-start justify-between gap-4' },
+      React.createElement('div', null,
+        React.createElement('h1', { className: 'text-2xl font-semibold' }, 'DiskWatch Scanner'),
+        React.createElement('p', { className: 'text-sm mt-1', style: { color: 'var(--text-secondary)' } },
+          'A link, not an install. Everything runs in this browser tab — nothing is uploaded, and nothing scans unless this page is open.')
+      ),
+      React.createElement(ThemeToggle, { theme, onChange: setTheme })
+    ),
+
+    React.createElement('section', { className: 'card p-5 sm:p-6 mb-6' },
+      React.createElement('h2', { className: 'font-semibold mb-3' }, 'Folders & drives'),
+      drives.length > 0 && React.createElement('div', { className: 'space-y-2 mb-4' },
+        drives.map((d) => React.createElement(DriveRow, { key: d.id, drive: d, onContinue: continueDrive, onForget: forgetDrive }))
+      ),
+      pickerError && React.createElement('p', { className: 'text-sm mb-3', style: { color: 'var(--status-critical)' } }, pickerError),
+      React.createElement('div', { className: 'flex flex-wrap items-center gap-3' },
+        React.createElement('button', {
+          className: 'px-4 py-2 rounded-lg text-sm font-medium text-white',
+          style: { background: 'var(--cat-1)' },
+          onClick: addDrive,
+        }, '+ Add a folder or drive'),
+        !scanning && React.createElement('button', {
+          className: 'px-4 py-2 rounded-lg text-sm font-medium',
+          style: { background: grantedDrives.length ? 'var(--status-good)' : 'var(--gridline)', color: grantedDrives.length ? 'white' : 'var(--text-muted)' },
+          disabled: grantedDrives.length === 0,
+          onClick: startScan,
+        }, 'Scan selected'),
+        scanning && React.createElement('button', {
+          className: 'px-4 py-2 rounded-lg text-sm font-medium hairline border',
+          onClick: stopScan,
+        }, 'Stop scan')
+      ),
+      scanning && React.createElement('div', { className: 'flex items-center gap-2 mt-4 text-sm', style: { color: 'var(--text-secondary)' } },
+        React.createElement(Spinner, null),
+        React.createElement('span', { className: 'tabular' }, `Scanned ${progress.files.toLocaleString()} files in ${progress.folders.toLocaleString()} folders...`)
+      ),
+      !scanning && pendingFreed > 0 && React.createElement('div', { className: 'flex flex-wrap items-center justify-between gap-3 mt-4 px-3 py-2 rounded-lg text-sm', style: { background: 'var(--page-plane)' } },
+        React.createElement('span', null, `~${formatBytes(pendingFreed)} estimated freed by recent deletions — re-scan to confirm it actually landed on disk.`),
+        React.createElement('button', {
+          className: 'px-3 py-1.5 rounded-md text-xs font-medium text-white shrink-0',
+          style: { background: 'var(--cat-1)' },
+          onClick: startScan,
+        }, 'Re-scan to confirm')
+      )
+    ),
+
+    comparison && React.createElement('section', {
+        className: 'card p-4 mb-6 flex items-start justify-between gap-3 text-sm',
+        style: { borderColor: comparison.actual >= comparison.expected * 0.9 ? 'var(--status-good)' : 'var(--status-warning)' },
+      },
+      React.createElement('div', null,
+        React.createElement('p', { className: 'font-medium mb-1' }, 'Re-scan confirmed'),
+        React.createElement('p', { style: { color: 'var(--text-secondary)' } },
+          `Before: ${formatBytes(comparison.before)} → After: ${formatBytes(comparison.after)} — actually freed ${formatBytes(Math.max(0, comparison.actual))} (estimated ${formatBytes(comparison.expected)}).`)
+      ),
+      React.createElement('button', { className: 'text-xs shrink-0', style: { color: 'var(--text-muted)' }, onClick: () => setComparison(null) }, 'Dismiss')
+    ),
+
+    trend && React.createElement('section', { className: 'card p-4 mb-6 text-sm flex items-center gap-2' },
+      React.createElement('span', {
+        className: 'inline-block w-2 h-2 rounded-full shrink-0',
+        style: { background: Math.abs(trend.deltaReclaim) < 10 * 1024 * 1024 ? 'var(--text-muted)' : trend.deltaReclaim > 0 ? 'var(--status-warning)' : 'var(--status-good)' },
+      }),
+      React.createElement('span', null,
+        Math.abs(trend.deltaReclaim) < 10 * 1024 * 1024
+          ? `Reclaimable clutter is about the same as your last scan of these folders (${trend.when}).`
+          : `Reclaimable clutter ${trend.deltaReclaim > 0 ? 'grew' : 'shrank'} ${formatBytes(Math.abs(trend.deltaReclaim))} ${trend.when}.`)
+    ),
+
+    results && React.createElement(React.Fragment, null,
+      results.truncated && React.createElement('div', { className: 'card p-4 mb-6 text-sm', style: { borderColor: 'var(--status-warning)', color: 'var(--text-secondary)' } },
+        `This is a very large scan — showing the first ${MAX_FLAGGED.toLocaleString()} flagged items. Scan a subfolder for full detail on the rest.`),
+
+      React.createElement('section', { className: 'grid grid-cols-3 gap-3 mb-6' },
+        [
+          { label: 'Total scanned', value: formatBytes(results.totalSize) },
+          { label: 'Files', value: results.totalFiles.toLocaleString() },
+          { label: 'Folders', value: results.totalFolders.toLocaleString() },
+        ].map((s) => React.createElement('div', { key: s.label, className: 'card p-4 text-center' },
+          React.createElement('p', { className: 'text-xl font-semibold tabular' }, s.value),
+          React.createElement('p', { className: 'text-xs mt-1', style: { color: 'var(--text-muted)' } }, s.label)
+        ))
+      ),
+
+      React.createElement('section', { className: 'card p-5 sm:p-6 mb-6' },
+        React.createElement('div', { className: 'flex items-center gap-2 mb-4' },
+          ['quick', 'plain'].map((mode) => React.createElement('button', {
+            key: mode,
+            className: 'px-3 py-1.5 rounded-md text-sm font-medium',
+            style: summaryMode === mode ? { background: 'var(--cat-1)', color: 'white' } : { color: 'var(--text-secondary)' },
+            onClick: () => setSummaryMode(mode),
+          }, mode === 'quick' ? 'Quick summary' : 'Plain-English summary'))
+        ),
+        summaryMode === 'quick'
+          ? React.createElement(CategoryChart, { categoryTotals: results.categoryTotals, totalFlaggedSize })
+          : React.createElement('div', null,
+              React.createElement('p', { className: 'text-sm leading-relaxed', style: { color: 'var(--text-primary)' } }, results.narrative),
+              React.createElement('p', { className: 'text-xs mt-3', style: { color: 'var(--text-muted)' } },
+                'Generated locally from category totals only — no file names or paths leave this browser, and no external AI service is called.')
+            )
+      ),
+
+      React.createElement('div', { className: 'grid sm:grid-cols-2 gap-6 mb-6' },
+        React.createElement('section', { className: 'card p-5' },
+          React.createElement('h3', { className: 'font-semibold mb-3 text-sm' }, 'Biggest folders'),
+          React.createElement(RankedList, { items: results.topFolders, emptyLabel: 'No subfolders found.' })
+        ),
+        React.createElement('section', { className: 'card p-5' },
+          React.createElement('h3', { className: 'font-semibold mb-3 text-sm' }, 'Biggest files'),
+          React.createElement(RankedList, { items: results.topFiles, emptyLabel: 'No files found.' })
+        )
+      ),
+
+      React.createElement('section', { className: 'card p-5 sm:p-6' },
+        React.createElement('div', { className: 'flex flex-wrap items-center justify-between gap-3 mb-4' },
+          React.createElement('h3', { className: 'font-semibold' }, `Cleanup suggestions (${flaggedFiltered.length})`),
+          React.createElement('select', {
+            className: 'text-sm rounded-md px-2 py-1 hairline border bg-transparent',
+            value: categoryFilter,
+            onChange: (e) => setCategoryFilter(e.target.value),
+          },
+            React.createElement('option', { value: 'all' }, 'All categories'),
+            CATEGORIES.map((c) => React.createElement('option', { key: c.key, value: c.key }, c.label))
+          )
+        ),
+        selected.size > 0 && React.createElement('div', { className: 'flex items-center justify-between mb-3 px-3 py-2 rounded-lg text-sm', style: { background: 'var(--page-plane)' } },
+          React.createElement('span', null, `${selected.size} selected`),
+          React.createElement('button', {
+            className: 'px-3 py-1.5 rounded-md text-xs font-medium text-white',
+            style: { background: 'var(--status-critical)' },
+            onClick: () => setConfirmBulk(true),
+          }, 'Delete selected')
+        ),
+        flaggedFiltered.length === 0
+          ? React.createElement('p', { className: 'text-sm', style: { color: 'var(--text-muted)' } }, 'Nothing flagged in this category.')
+          : React.createElement('div', { className: 'divide-y', style: { borderColor: 'var(--gridline)' } },
+              flaggedFiltered.map((item) => {
+                const cat = CATEGORIES.find((c) => c.key === item.category);
+                return React.createElement('div', { key: item.id, className: 'flex items-center gap-3 py-3' },
+                  React.createElement('input', { type: 'checkbox', checked: selected.has(item.id), onChange: () => toggleSelected(item.id) }),
+                  React.createElement('span', { className: 'inline-block w-2 h-2 rounded-full shrink-0', style: { background: cat ? cat.color : 'var(--text-muted)' } }),
+                  React.createElement('div', { className: 'min-w-0 flex-1' },
+                    React.createElement('p', { className: 'text-sm truncate', title: item.path }, item.name),
+                    React.createElement('p', { className: 'text-xs truncate', style: { color: 'var(--text-muted)' } }, item.reason)
+                  ),
+                  React.createElement('span', { className: 'tabular text-sm shrink-0', style: { color: 'var(--text-secondary)' } }, formatBytes(item.size)),
+                  React.createElement('button', {
+                    className: 'text-xs font-medium px-2 py-1 rounded-md shrink-0',
+                    style: { color: 'var(--status-critical)' },
+                    onClick: () => setConfirmItem(item),
+                  }, 'Delete')
+                );
+              })
+            )
+      ),
+
+      history.length > 0 && React.createElement('section', { className: 'card p-5 sm:p-6 mt-6' },
+        React.createElement('button', {
+          className: 'flex items-center justify-between w-full text-sm font-semibold',
+          onClick: () => setShowHistory((s) => !s),
+        },
+          React.createElement('span', null, `Scan history (${history.length})`),
+          React.createElement('span', { style: { color: 'var(--text-muted)' } }, showHistory ? 'Hide' : 'Show')
+        ),
+        showHistory && React.createElement('div', { className: 'mt-4 overflow-x-auto' },
+          React.createElement('table', { className: 'w-full text-sm' },
+            React.createElement('thead', null,
+              React.createElement('tr', { className: 'text-left', style: { color: 'var(--text-muted)' } },
+                React.createElement('th', { className: 'font-normal pb-2 pr-3' }, 'Date'),
+                React.createElement('th', { className: 'font-normal pb-2 pr-3' }, 'Total size'),
+                React.createElement('th', { className: 'font-normal pb-2' }, 'Reclaimable')
+              )
+            ),
+            React.createElement('tbody', { className: 'divide-y', style: { borderColor: 'var(--gridline)' } },
+              [...history].reverse().map((h) => React.createElement('tr', { key: h.id },
+                React.createElement('td', { className: 'py-2 pr-3 tabular', style: { color: 'var(--text-secondary)' } }, new Date(h.timestamp).toLocaleString()),
+                React.createElement('td', { className: 'py-2 pr-3 tabular' }, formatBytes(h.totalSize)),
+                React.createElement('td', { className: 'py-2 tabular' }, formatBytes(h.reclaimableSize))
+              ))
+            )
+          )
+        )
+      )
+    ),
+
+    confirmItem && React.createElement(ConfirmModal, {
+      title: `Delete "${confirmItem.name}"?`,
+      body: `${confirmItem.kind === 'directory' ? 'This folder and everything inside it' : 'This file'} will be permanently removed (${formatBytes(confirmItem.size)}). This cannot be undone.`,
+      confirmLabel: 'Delete', danger: true,
+      onConfirm: () => deleteOne(confirmItem),
+      onCancel: () => setConfirmItem(null),
+    }),
+    confirmBulk && React.createElement(ConfirmModal, {
+      title: `Delete ${selected.size} items?`,
+      body: 'These files and folders will be permanently removed. This cannot be undone.',
+      confirmLabel: 'Delete all', danger: true,
+      onConfirm: deleteSelected,
+      onCancel: () => setConfirmBulk(false),
+    }),
+    React.createElement(ToastStack, { toasts })
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script>
